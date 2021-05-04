@@ -38,6 +38,8 @@ First, the malware binary is read in 4-byte increments. The first 2 bytes are co
 
 <img src="https://github.com/Jeffkang-94/Resilience_against_AEs/blob/main/asset/convert.png" width="800" height="300">
 
+### Split the dataset
+We divided the dataset into 9:1 ratios using the following code.
 
 ```
 cd classification
