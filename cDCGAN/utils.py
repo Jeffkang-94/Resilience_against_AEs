@@ -132,6 +132,7 @@ class CustomImageDataset(Dataset):
         all_labels = []
 
         class_names = os.walk(self.data_set_path).__next__()[1]
+        max_size = 32
 
         for index, class_name in enumerate(class_names):
             label = index

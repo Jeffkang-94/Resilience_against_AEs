@@ -1,193 +1,378 @@
+# MNIST image generation using Conditional DCGAN
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import torchvision.utils as vutils
+from torch.autograd import Variable
+import torchvision.datasets as dsets
+import torchvision.transforms as transforms
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-import random, os
-from torchvision import transforms
-#from utils import get_celeba
-from cDCGAN import weights_init, Generator, Discriminator
+import os
 from utils import CustomImageDataset
+# Parameters
+image_size = 256
+label_dim = 9
+G_input_dim = 100
+G_output_dim = 3
+D_input_dim = 3
+D_output_dim = 1
+num_filters =  [1024, 512, 256, 128, 64, 32]
 
-# Set random seed for reproducibility.
-seed = 369
-random.seed(seed)
-torch.manual_seed(seed)
-print("Random Seed: ", seed)
+learning_rate = 0.00001
+betas = (0.5, 0.999)
+batch_size = 64
+num_epochs = 2000
+data_dir = '../../Data/MNIST_data/'
+save_dir = 'MNIST_cDCGAN_results/'
 
-# Parameters to define the model.
-params = {
-    "bsize" : 128,# Batch size during training.
-    'imsize' : 64,# Spatial size of training images. All images will be resized to this size during preprocessing.
-    'nc' : 3,# Number of channles in the training images. For coloured images this is 3.
-    'nz' : 100,# Size of the Z latent vector (the input to the generator).
-    'ngf' : 64,# Size of feature maps in the generator. The depth will be multiples of this.
-    'ndf' : 64, # Size of features maps in the discriminator. The depth will be multiples of this.
-    'nepochs' : 10,# Number of training epochs.
-    'lr' : 0.0002,# Learning rate for optimizers
-    'beta1' : 0.5,# Beta1 hyperparam for Adam optimizer
-    'save_epoch' : 2}# Save step.
-
-# Use GPU is available else use CPU.
-device = torch.device("cuda:0" if(torch.cuda.is_available()) else "cpu")
-print(device, " will be used.\n")
-normalize = transforms.Normalize(mean=[0.5,0.5,0.5],
-                                     std=[0.5,0.5,0.5])
-# Get the data.
-#dataloader = get_celeba(params)
-transform_train = transforms.Compose([
-    
-    #transforms.RandomResizedCrop(224),
-    #transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    normalize
-])
-trainset = CustomImageDataset(os.path.join('..','dataset', 'train'), transform_train)
-dataloader = torch.utils.data.DataLoader(trainset, batch_size=params['bsize'], shuffle=True, num_workers=16)
-# Plot the training images.
+# MNIST dataset
+transform_train= transforms.Compose([transforms.Resize((image_size,image_size)),
+                                transforms.ToTensor(),
+                                transforms.Normalize(mean=(0.5,0.5,0.5), std=(0.5,0.5,0.5))])
 
 
-# Create the generator.
-netG = Generator(params).to(device)
-# Apply the weights_init() function to randomly initialize all
-# weights to mean=0.0, stddev=0.2
-netG.apply(weights_init)
-# Print the model.
-print(netG)
+trainset = CustomImageDataset(os.path.join('data','train'), transform_train)
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=16)
+# For logger
+def to_np(x):
+    return x.data.cpu().numpy()
 
-# Create the discriminator.
-netD = Discriminator(params).to(device)
-# Apply the weights_init() function to randomly initialize all
-# weights to mean=0.0, stddev=0.2
-netD.apply(weights_init)
-# Print the model.
-print(netD)
 
-# Binary Cross Entropy loss function.
-criterion = nn.BCELoss()
+def to_var(x):
+    if torch.cuda.is_available():
+        x = x.cuda()
+    return x
 
-fixed_noise = torch.randn(64, params['nz'], 1, 1, device=device)
 
-real_label = 1
-fake_label = 0
+# De-normalization
+def denorm(x):
+    out = (x + 1) / 2
+    return out.clamp(0, 1)
 
-# Optimizer for the discriminator.
-optimizerD = optim.Adam(netD.parameters(), lr=params['lr'], betas=(params['beta1'], 0.999))
-# Optimizer for the generator.
-optimizerG = optim.Adam(netG.parameters(), lr=params['lr'], betas=(params['beta1'], 0.999))
 
-# Stores generated images as training progresses.
-img_list = []
-# Stores generator losses during training.
-G_losses = []
-# Stores discriminator losses during training.
-D_losses = []
+# Generator model
+class Generator(torch.nn.Module):
+    def __init__(self, input_dim, label_dim, num_filters, output_dim):
+        super(Generator, self).__init__()
 
-iters = 0
-fill = torch.zeros([10, 10, 256, 256])
-for i in range(10):
+        # Hidden layers
+        self.hidden_layer1 = torch.nn.Sequential()
+        self.hidden_layer2 = torch.nn.Sequential()
+        self.hidden_layer = torch.nn.Sequential()
+        for i in range(len(num_filters)):
+            # Deconvolutional layer
+            if i == 0:
+                # For input
+                input_deconv = torch.nn.ConvTranspose2d(input_dim, int(num_filters[i]/2), kernel_size=4, stride=1, padding=0)
+                self.hidden_layer1.add_module('input_deconv', input_deconv)
+
+                # Initializer
+                torch.nn.init.normal_(input_deconv.weight, mean=0.0, std=0.02)
+                torch.nn.init.constant_(input_deconv.bias, 0.0)
+
+                # Batch normalization
+                self.hidden_layer1.add_module('input_bn', torch.nn.BatchNorm2d(int(num_filters[i]/2)))
+
+                # Activation
+                self.hidden_layer1.add_module('input_act', torch.nn.ReLU())
+
+                # For label
+                label_deconv = torch.nn.ConvTranspose2d(label_dim, int(num_filters[i]/2), kernel_size=4, stride=1, padding=0)
+                self.hidden_layer2.add_module('label_deconv', label_deconv)
+
+                # Initializer
+                torch.nn.init.normal_(label_deconv.weight, mean=0.0, std=0.02)
+                torch.nn.init.constant_(label_deconv.bias, 0.0)
+
+                # Batch normalization
+                self.hidden_layer2.add_module('label_bn', torch.nn.BatchNorm2d(int(num_filters[i]/2)))
+
+                # Activation
+                self.hidden_layer2.add_module('label_act', torch.nn.ReLU())
+            else:
+                deconv = torch.nn.ConvTranspose2d(num_filters[i-1], num_filters[i], kernel_size=4, stride=2, padding=1)
+
+                deconv_name = 'deconv' + str(i + 1)
+                self.hidden_layer.add_module(deconv_name, deconv)
+
+                # Initializer
+                torch.nn.init.normal_(deconv.weight, mean=0.0, std=0.02)
+                torch.nn.init.constant_(deconv.bias, 0.0)
+
+                # Batch normalization
+                bn_name = 'bn' + str(i + 1)
+                self.hidden_layer.add_module(bn_name, torch.nn.BatchNorm2d(num_filters[i]))
+
+                # Activation
+                act_name = 'act' + str(i + 1)
+                self.hidden_layer.add_module(act_name, torch.nn.ReLU())
+
+        # Output layer
+        self.output_layer = torch.nn.Sequential()
+        # Deconvolutional layer
+        out = torch.nn.ConvTranspose2d(num_filters[i], output_dim, kernel_size=4, stride=2, padding=1)
+        self.output_layer.add_module('out', out)
+        # Initializer
+        torch.nn.init.normal_(out.weight, mean=0.0, std=0.02)
+        torch.nn.init.constant_(out.bias, 0.0)
+        # Activation
+        self.output_layer.add_module('act', torch.nn.Tanh())
+
+    def forward(self, z, c):
+        h1 = self.hidden_layer1(z)
+        h2 = self.hidden_layer2(c)
+        x = torch.cat([h1, h2], 1)
+        h = self.hidden_layer(x)
+        out = self.output_layer(h)
+        return out
+
+
+# Discriminator model
+class Discriminator(torch.nn.Module):
+    def __init__(self, input_dim, label_dim, num_filters, output_dim):
+        super(Discriminator, self).__init__()
+
+        self.hidden_layer1 = torch.nn.Sequential()
+        self.hidden_layer2 = torch.nn.Sequential()
+        self.hidden_layer = torch.nn.Sequential()
+        for i in range(len(num_filters)):
+            # Convolutional layer
+            if i == 0:
+                # For input
+                input_conv = torch.nn.Conv2d(input_dim, int(num_filters[i]/2), kernel_size=4, stride=2, padding=1)
+                self.hidden_layer1.add_module('input_conv', input_conv)
+
+                # Initializer
+                torch.nn.init.normal_(input_conv.weight, mean=0.0, std=0.02)
+                torch.nn.init.constant_(input_conv.bias, 0.0)
+
+                # Activation
+                self.hidden_layer1.add_module('input_act', torch.nn.LeakyReLU(0.2))
+
+                # For label
+                label_conv = torch.nn.Conv2d(label_dim, int(num_filters[i]/2), kernel_size=4, stride=2, padding=1)
+                self.hidden_layer2.add_module('label_conv', label_conv)
+
+                # Initializer
+                torch.nn.init.normal_(label_conv.weight, mean=0.0, std=0.02)
+                torch.nn.init.constant_(label_conv.bias, 0.0)
+
+                # Activation
+                self.hidden_layer2.add_module('label_act', torch.nn.LeakyReLU(0.2))
+            else:
+                conv = torch.nn.Conv2d(num_filters[i-1], num_filters[i], kernel_size=4, stride=2, padding=1)
+
+                conv_name = 'conv' + str(i + 1)
+                self.hidden_layer.add_module(conv_name, conv)
+
+                # Initializer
+                torch.nn.init.normal_(conv.weight, mean=0.0, std=0.02)
+                torch.nn.init.constant_(conv.bias, 0.0)
+
+                # Batch normalization
+                bn_name = 'bn' + str(i + 1)
+                self.hidden_layer.add_module(bn_name, torch.nn.BatchNorm2d(num_filters[i]))
+
+                # Activation
+                act_name = 'act' + str(i + 1)
+                self.hidden_layer.add_module(act_name, torch.nn.LeakyReLU(0.2))
+
+        # Output layer
+        self.output_layer = torch.nn.Sequential()
+        # Convolutional layer
+        out = torch.nn.Conv2d(num_filters[i], output_dim, kernel_size=4, stride=1, padding=0)
+        self.output_layer.add_module('out', out)
+        # Initializer
+        torch.nn.init.normal_(out.weight, mean=0.0, std=0.02)
+        torch.nn.init.constant_(out.bias, 0.0)
+        # Activation
+        self.output_layer.add_module('act', torch.nn.Sigmoid())
+
+    def forward(self, z, c):
+        h1 = self.hidden_layer1(z)
+        h2 = self.hidden_layer2(c)
+        x = torch.cat([h1, h2], 1)
+        h = self.hidden_layer(x)
+        out = self.output_layer(h)
+        return out
+
+
+# Plot losses
+def plot_loss(d_losses, g_losses, num_epoch, save=False, save_dir='cDCGAN_malware_images/', show=False):
+    fig, ax = plt.subplots()
+    ax.set_xlim(0, num_epochs)
+    ax.set_ylim(0, max(np.max(g_losses), np.max(d_losses))*1.1)
+    plt.xlabel('Epoch {0}'.format(num_epoch + 1))
+    plt.ylabel('Loss values')
+    plt.plot(d_losses, label='Discriminator')
+    plt.plot(g_losses, label='Generator')
+    plt.legend()
+
+    # save figure
+    if save:
+        if not os.path.exists(save_dir):
+            os.mkdir(save_dir)
+        save_fn = save_dir + 'cDCGAN_malware_images_losses_{:d}'.format(num_epoch + 1) + '.png'
+        plt.savefig(save_fn)
+
+    if show:
+        plt.show()
+    else:
+        plt.close()
+
+
+def plot_result(generator, noise, label, num_epoch, save=False, save_dir='cDCGAN_malware_images/', show=False, fig_size=(5, 5)):
+    generator.eval()
+
+    noise = Variable(noise.cuda())
+    label = Variable(label.cuda())
+    gen_image = generator(noise, label)
+    gen_image = denorm(gen_image)
+
+    generator.train()
+
+    n_rows = np.sqrt(noise.size()[0]).astype(np.int32)
+    n_cols = np.sqrt(noise.size()[0]).astype(np.int32)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=fig_size)
+    for ax, img in zip(axes.flatten(), gen_image):
+        ax.axis('off')
+        #ax.set_adjustable('box-forced')
+        # Scale to 0-255
+        img = (((img - img.min()) * 255) / (img.max() - img.min())).cpu().data.numpy().transpose(1, 2, 0).astype(
+            np.uint8)
+        # ax.imshow(img.cpu().data.view(image_size, image_size, 3).numpy(), cmap=None, aspect='equal')
+        ax.imshow(img, cmap=None, aspect='equal')
+    plt.subplots_adjust(wspace=0, hspace=0)
+    title = 'Epoch {0}'.format(num_epoch + 1)
+    fig.text(0.5, 0.04, title, ha='center')
+
+    # save figure
+    if save:
+        if not os.path.exists(save_dir):
+            os.mkdir(save_dir)
+        save_fn = save_dir + 'cDCGAN_malware_images_epoch_{:d}'.format(num_epoch+1) + '.png'
+        plt.savefig(save_fn)
+
+    if show:
+        plt.show()
+    else:
+        plt.close()
+
+
+# Models
+G = Generator(G_input_dim, label_dim, num_filters, G_output_dim)
+D = Discriminator(D_input_dim, label_dim, num_filters[::-1], D_output_dim)
+G.cuda()
+D.cuda()
+
+# Set the logger
+
+# Loss function
+criterion = torch.nn.BCELoss()
+# Optimizers
+G_optimizer = torch.optim.Adam(G.parameters(), lr=learning_rate*0.1, betas=betas)
+D_optimizer = torch.optim.Adam(D.parameters(), lr=learning_rate, betas=betas)
+
+# Training GAN
+D_avg_losses = []
+G_avg_losses = []
+
+# Fixed noise & label for test
+num_test_samples = 9*1
+
+
+
+# label preprocess
+onehot = torch.zeros(label_dim, label_dim)
+onehot = onehot.scatter_(1, torch.LongTensor([0, 1, 2, 3, 4, 5, 6, 7, 8]).view(label_dim, 1), 1).view(label_dim, label_dim, 1, 1)
+fill = torch.zeros([label_dim, label_dim, image_size, image_size])
+for i in range(label_dim):
     fill[i, i, :, :] = 1
-print("Starting Training Loop...")
-print("-"*25)
 
-for epoch in range(params['nepochs']):
-    for i, (data, label) in enumerate(dataloader, 0):
-        # Transfer data tensor to GPU/CPU (device)
-        real_data = data.to(device)
-        label = label.to(device)
-        # Get batch size. Can be different from params['nbsize'] for last batch in epoch.
-        b_size = real_data.size(0)
+step = 0
+for epoch in range(num_epochs):
+    D_losses = []
+    G_losses = []
+
+    if epoch == 5 or epoch == 10:
+        G_optimizer.param_groups[0]['lr'] /= 2
+        D_optimizer.param_groups[0]['lr'] /= 2
+
+    # minibatch training
+    #
+    for i, data in enumerate(trainloader):
+        images, labels = data['image'], data['label']
+        # image data
+        mini_batch = images.size()[0]
+        x_ = images.cuda()
+
+        # labels
         
-        # Make accumalated gradients of the discriminator zero.
-        netD.zero_grad()
-        # Create labels for the real data. (label=1)
-        #label = torch.full((b_size, ), real_label, device=device)
-        onehot_label = fill[label] # label
-        output = netD(real_data, onehot_label).view(-1)
-        errD_real = criterion(output, label)
-        # Calculate gradients for backpropagation.
-        errD_real.backward()
-        D_x = output.mean().item()
+        c_fill_ = fill[labels].cuda()
+
+        # Train discriminator with real data
+        D_real_decision = D(x_, c_fill_).squeeze()
+        y_real_ = torch.ones_like(D_real_decision).cuda()
+        y_fake_ = torch.zeros_like(D_real_decision).cuda()
+        D_real_loss = criterion(D_real_decision, y_real_)
+
+        # Train discriminator with fake data
         
-        # Sample random data from a unit normal distribution.
-        noise = torch.randn(b_size, params['nz'], 1, 1, device=device)
-        # Generate fake data (images).
-        fake_data = netG(noise)
-        # Create labels for fake data. (label=0)
-        label.fill_(fake_label  )
-        # Calculate the output of the discriminator of the fake data.
-        # As no gradients w.r.t. the generator parameters are to be
-        # calculated, detach() is used. Hence, only gradients w.r.t. the
-        # discriminator parameters will be calculated.
-        # This is done because the loss functions for the discriminator
-        # and the generator are slightly different.
-        output = netD(fake_data.detach()).view(-1)
-        errD_fake = criterion(output, label)
-        # Calculate gradients for backpropagation.
-        errD_fake.backward()
-        D_G_z1 = output.mean().item()
-
-        # Net discriminator loss.
-        errD = errD_real + errD_fake
-        # Update discriminator parameters.
-        optimizerD.step()
+        z_ = torch.randn(mini_batch, G_input_dim).view(-1, G_input_dim, 1, 1)
+        z_ = z_.cuda()
         
-        # Make accumalted gradients of the generator zero.
-        netG.zero_grad()
-        # We want the fake data to be classified as real. Hence
-        # real_label are used. (label=1)
-        label.fill_(real_label)
-        # No detach() is used here as we want to calculate the gradients w.r.t.
-        # the generator this time.
-        output = netD(fake_data).view(-1)
-        errG = criterion(output, label)
-        # Gradients for backpropagation are calculated.
-        # Gradients w.r.t. both the generator and the discriminator
-        # parameters are calculated, however, the generator's optimizer
-        # will only update the parameters of the generator. The discriminator
-        # gradients will be set to zero in the next iteration by netD.zero_grad()
-        errG.backward()
 
-        D_G_z2 = output.mean().item()
-        # Update generator parameters.
-        optimizerG.step()
+        c_ = (torch.rand(mini_batch, 1) * label_dim).type(torch.LongTensor).squeeze()
+        c_onehot_ = onehot[c_].cuda()
 
-        # Check progress of training.
-        if i%50 == 0:
-            print(torch.cuda.is_available())
-            print('[%d/%d][%d/%d]\tLoss_D: %.4f\tLoss_G: %.4f\tD(x): %.4f\tD(G(z)): %.4f / %.4f'
-                  % (epoch, params['nepochs'], i, len(dataloader),
-                     errD.item(), errG.item(), D_x, D_G_z1, D_G_z2))
+        if epoch == 0 :
+            fixed_noise = z_
+            fixed_label = c_onehot_
+        gen_image = G(z_, c_onehot_)
 
-        # Save the losses for plotting.
-        G_losses.append(errG.item())
-        D_losses.append(errD.item())
+        c_fill_ = fill[c_].cuda()
+        #print(gen_image.shape, c_fill_.shape)
+        D_fake_decision = D(gen_image, c_fill_).squeeze()
+        D_fake_loss = criterion(D_fake_decision, y_fake_)
 
-        # Check how the generator is doing by saving G's output on a fixed noise.
-        if (iters % 100 == 0) or ((epoch == params['nepochs']-1) and (i == len(dataloader)-1)):
-            with torch.no_grad():
-                fake_data = netG(fixed_noise).detach().cpu()
-            img_list.append(vutils.make_grid(fake_data, padding=2, normalize=True))
+        # Back propagation
+        D_loss = D_real_loss + D_fake_loss
+        D.zero_grad()
+        D_loss.backward()
+        D_optimizer.step()
 
-        iters += 1
+        # Train generator
+        z_ = torch.randn(mini_batch, G_input_dim).view(-1, G_input_dim, 1, 1)
+        z_ = z_.cuda()
 
-    # Save the model.
-    if epoch % params['save_epoch'] == 0:
-        torch.save({
-            'generator' : netG.state_dict(),
-            'discriminator' : netD.state_dict(),
-            'optimizerG' : optimizerG.state_dict(),
-            'optimizerD' : optimizerD.state_dict(),
-            'params' : params
-            }, 'model/model_epoch_{}.pth'.format(epoch))
+        c_ = (torch.rand(mini_batch, 1) * label_dim).type(torch.LongTensor).squeeze()
+        c_onehot_ = onehot[c_].cuda()
+        gen_image = G(z_, c_onehot_)
 
-# Save the final trained model.
-torch.save({
-            'generator' : netG.state_dict(),
-            'discriminator' : netD.state_dict(),
-            'optimizerG' : optimizerG.state_dict(),
-            'optimizerD' : optimizerD.state_dict(),
-            'params' : params
-            }, 'model/model_final.pth')
+        c_fill_ = fill[c_].cuda()
+        D_fake_decision = D(gen_image, c_fill_).squeeze()
+        G_loss = criterion(D_fake_decision, y_real_)
+
+        # Back propagation
+        G.zero_grad()
+        G_loss.backward()
+        G_optimizer.step()
+
+        # loss values
+        D_losses.append(D_loss.item())
+        G_losses.append(G_loss.item())
+
+        print('Epoch [%d/%d], Step [%d/%d], D_loss: %.4f, G_loss: %.4f'
+              % (epoch+1, num_epochs, i+1, len(trainloader), D_loss.item(), G_loss.item()))
+
+        step += 1
+
+    D_avg_loss = torch.mean(torch.FloatTensor(D_losses))
+    G_avg_loss = torch.mean(torch.FloatTensor(G_losses))
+
+    # avg loss values for plot
+    D_avg_losses.append(D_avg_loss)
+    G_avg_losses.append(G_avg_loss)
+    if epoch%50 == 0 :
+        plot_loss(D_avg_losses, G_avg_losses, epoch, save=True)
+
+        # Show result for fixed noise
+        plot_result(G, fixed_noise, fixed_label, epoch, save=True)
