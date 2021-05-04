@@ -36,7 +36,7 @@ This figure illustrates how malware files are converted into Incremental Coordin
 First, the malware binary is read in 4-byte increments. The first 2 bytes are converted to x coordinates, the last 2 bytes are converted to y coordinates, the value represented by those coordinates is incremented by 1. This process is performed until the end of the file is reached. This generates a 256 by 256 gray scale image from each malware sample. The key advantage of visualizing a malicious PE file is that it can perform malware detection/classification without running malware. In addition, small changes that were not detectable in malware binaries may be detectable in malware converted to images
 
 
-<img src="https://github.com/Jeffkang-94/Resilience_against_AEs/blob/main/asset/convert.png" width="600" height="400">
+<img src="https://github.com/Jeffkang-94/Resilience_against_AEs/blob/main/asset/convert.png" width="800" height="300">
 
 
 ```
@@ -80,7 +80,7 @@ python test.py # output the accuracy
 
 
 
-## Training the cDCGAN
+## Training cDCGAN
 
 Before training the model, we randomly pick the 32 images per class.
 ```
@@ -91,4 +91,19 @@ python train.py # training the cDCGAN model
 <img src="https://github.com/Jeffkang-94/Resilience_against_AEs/blob/main/asset/cDCGAN.png" width="800" height="400">
 
 
-## 
+## Re-Training the classifier
+
+Once cDCGAN is fully trained, we can leverage the model to generate extra data to enhance the baseline model.
+In the simple experiment, we adjust the number of samples and evaluate the performance based on the classification accuracy.
+
+
+### Evaluation 
+Metric/Test | Baseline | n=10 | n=20 | n=100
+----- | ----- | ----- | ----- | -----
+original(balanced) | 97.4(96.4) | 97.4(95.4) | 97.2(95.2) | 97.5(95.4)
+AEs(balanced) | 71.1(59.2) | 74.56(66.78) | **75.11(70.16)** | 67.3(65.41)
+Average FPR | 3.78  | 2.97 | 3.0 | 3.8
+
+
+### ROC curve
+<img src="https://github.com/Jeffkang-94/Resilience_against_AEs/blob/main/asset/ROC%20curve.png" width="800" height="400">
